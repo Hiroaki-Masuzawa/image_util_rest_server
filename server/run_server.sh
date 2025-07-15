@@ -1,0 +1,1 @@
+docker run -d -it --rm --gpus all --net host -v ${PWD}:/userdir -w /userdir --name apiserver apiserver python3 app.py
