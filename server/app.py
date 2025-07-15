@@ -27,9 +27,134 @@ def load_maskrcnn_model():
     metadata = MetadataCatalog.get(cfg.DATASETS.TRAIN[0])
     return {"predictor": predictor, "metadata": metadata}
 
+
+from segment_anything import (
+    build_sam,
+    build_sam_hq,
+    SamPredictor
+) 
+import GroundingDINO.groundingdino.datasets.transforms as T
+from automatic_label_ram_demo import load_model
+import torchvision.transforms as TS
+from ram.models import ram
+from ram import inference_ram
+from automatic_label_ram_demo import get_grounding_output
+import torchvision
+import re
+
+def load_RGS_model():
+    None
+
+def pred_RGS_model(image_pil):
+    config_file = '/Grounded-Segment-Anything/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py'
+    grounded_checkpoint = '/Grounded-Segment-Anything/groundingdino_swint_ogc.pth'
+    ram_checkpoint = '/Grounded-Segment-Anything/ram_swin_large_14m.pth'
+    sam_checkpoint = '/Grounded-Segment-Anything/sam_vit_h_4b8939.pth'
+    box_threshold = 0.25
+    text_threshold  = 0.2
+    iou_threshold = 0.5
+    device = 'cuda'
+
+    transform1 = T.Compose(
+        [
+            T.RandomResize([800], max_size=1333),
+            T.ToTensor(),
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ]
+    )
+
+    image, _ = transform1(image_pil, None) 
+
+    grounded_model = load_model(config_file, grounded_checkpoint, device=device)
+
+    normalize = TS.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+    transform2 = TS.Compose([
+                    TS.Resize((384, 384)),
+                    TS.ToTensor(), normalize
+                ])
+    
+    ram_model = ram(pretrained=ram_checkpoint,
+                                        image_size=384,
+                                        vit='swin_l')
+    ram_model.eval()
+
+    ram_model = ram_model.to(device)
+    raw_image = image_pil.resize((384, 384))
+    raw_image  = transform2(raw_image).unsqueeze(0).to(device)
+    res = inference_ram(raw_image , ram_model)
+    tags = res[0].replace(' |', ',')
+    boxes_filt, scores, pred_phrases = get_grounding_output(
+        grounded_model, image, tags, box_threshold, text_threshold, device=device
+    )
+
+    predictor = SamPredictor(build_sam(checkpoint=sam_checkpoint).to(device))
+    image_np = np.array(image_pil)
+    predictor.set_image(image_np)
+    size = image_pil.size
+    H, W = size[1], size[0]
+    for i in range(boxes_filt.size(0)):
+        boxes_filt[i] = boxes_filt[i] * torch.Tensor([W, H, W, H])
+        boxes_filt[i][:2] -= boxes_filt[i][2:] / 2
+        boxes_filt[i][2:] += boxes_filt[i][:2]
+    boxes_filt = boxes_filt.cpu()
+    nms_idx = torchvision.ops.nms(boxes_filt, scores, iou_threshold).numpy().tolist()
+    boxes_filt = boxes_filt[nms_idx]
+    pred_phrases = [pred_phrases[idx] for idx in nms_idx]
+
+    transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image_np.shape[:2]).to(device)
+    masks, _, _ = predictor.predict_torch(
+        point_coords = None,
+        point_labels = None,
+        boxes = transformed_boxes.to(device),
+        multimask_output = False,
+    )
+    value  = 0
+    mask_img = torch.zeros(masks.shape[-2:])
+    for idx, mask in enumerate(masks):
+        mask_img[mask.cpu().numpy()[0] == True] = value + idx + 1
+
+    results = []
+    for phrase, bbox, mask in zip(pred_phrases, boxes_filt.cpu(), masks.cpu()):
+        match = re.match(r"(.+?)\s*\(([^()]*)\)", phrase)
+        if match:
+            class_name = match.group(1)
+            confidence = match.group(2)
+        else :
+            class_name = phrase
+            confidence = 1.0
+        x1, y1, x2, y2 = bbox.numpy().astype(np.float64)
+        center_x = (x1+x2)/2
+        center_y = (y1+y2)/2
+        width = (x2-x1)/2
+        height = (y2-y1)/2
+
+        contours, _ = cv2.findContours(mask[0].numpy().astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        points = []
+        for contour in contours:
+            for point in contour:
+                x, y = point[0]
+                points.append({"x": int(x), "y": int(y)})
+
+        mask = mask.numpy().astype(np.int64)
+        results.append({
+                "class": class_name,
+                "confidence": confidence,
+                "bbox": [x1, y1, x2, y2],
+                "x": float(center_x),
+                "y": float(center_y),
+                "width": float(width),
+                "height": float(height),
+                "mask": mask[0].tolist(),
+                "points": points,
+            })
+    return results
+
+
 # モデル名とその処理インスタンスのマップ
 model_registry: Dict[str, Dict] = {
-    "maskrcnn": load_maskrcnn_model()
+    "maskrcnn": load_maskrcnn_model(), 
+    "ram-grounded-sam": load_RGS_model()
 }
 
 # --- 画像予測処理 ---
@@ -39,54 +164,57 @@ async def predict(model_name: str, file: UploadFile = File(...)):
     if model_name not in model_registry:
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found.")
 
-    model_data = model_registry[model_name]
-    predictor = model_data["predictor"]
-    metadata = model_data["metadata"]
-
     contents = await file.read()
     image = Image.open(BytesIO(contents)).convert("RGB")
     image_np = np.array(image)
 
-    outputs = predictor(image_np)
-    instances = outputs["instances"].to("cpu")
+    if model_name == 'maskrcnn':
+        model_data = model_registry[model_name]
+        predictor = model_data["predictor"]
+        metadata = model_data["metadata"]
 
-    results = []
+        outputs = predictor(image_np)
+        instances = outputs["instances"].to("cpu")
 
-    for i in range(len(instances)):
-        box = instances.pred_boxes.tensor[i].numpy().tolist()
-        x1, y1, x2, y2 = box
-        width = x2 - x1
-        height = y2 - y1
-        center_x = (x1 + x2) / 2
-        center_y = (y1 + y2) / 2
+        results = []
 
-        confidence = float(instances.scores[i])
-        class_id = int(instances.pred_classes[i])
-        class_name = metadata.get("thing_classes", [])[class_id] if metadata.get("thing_classes") else str(class_id)
+        for i in range(len(instances)):
+            box = instances.pred_boxes.tensor[i].numpy().tolist()
+            x1, y1, x2, y2 = box
+            width = x2 - x1
+            height = y2 - y1
+            center_x = (x1 + x2) / 2
+            center_y = (y1 + y2) / 2
 
-        mask = instances.pred_masks[i].numpy().astype(np.uint8)
+            confidence = float(instances.scores[i])
+            class_id = int(instances.pred_classes[i])
+            class_name = metadata.get("thing_classes", [])[class_id] if metadata.get("thing_classes") else str(class_id)
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        points = []
-        for contour in contours:
-            for point in contour:
-                x, y = point[0]
-                points.append({"x": int(x), "y": int(y)})
+            mask = instances.pred_masks[i].numpy().astype(np.uint8)
 
-        results.append({
-            "class": class_name,
-            "confidence": confidence,
-            "bbox": [x1, y1, x2, y2],
-            "x": center_x,
-            "y": center_y,
-            "width": width,
-            "height": height,
-            "mask": mask.tolist(),
-            "points": points,
-        })
+            contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            points = []
+            for contour in contours:
+                for point in contour:
+                    x, y = point[0]
+                    points.append({"x": int(x), "y": int(y)})
 
-    return JSONResponse(content={"predictions": results})
+            results.append({
+                "class": class_name,
+                "confidence": confidence,
+                "bbox": [x1, y1, x2, y2],
+                "x": center_x,
+                "y": center_y,
+                "width": width,
+                "height": height,
+                "mask": mask.tolist(),
+                "points": points,
+            })
 
+        return JSONResponse(content={"predictions": results})
+    else:
+        results = pred_RGS_model(image_pil=image)
+        return JSONResponse(content={"predictions": results})
 
 @app.get("/ping")
 def ping():

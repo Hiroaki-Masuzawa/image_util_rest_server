@@ -18,3 +18,30 @@ RUN pip install fastapi uvicorn opencv-python pillow
 RUN apt update && DEBIAN_FRONTEND=noninteractive apt install -y libopencv*
 RUN pip install python-multipart
 ENV PYTHONPATH=/detectron2_repo
+
+
+# install Grounded-Segment-Anything
+ENV AM_I_DOCKER=True
+ENV BUILD_WITH_CUDA=1
+ENV CUDA_HOME=/usr/local/cuda
+
+RUN cd / \
+    && git clone --recursive https://github.com/IDEA-Research/Grounded-Segment-Anything.git \
+    && cd /Grounded-Segment-Anything \
+    && python -m pip install -e segment_anything \
+    && pip install --no-build-isolation -e GroundingDINO \
+    && git clone https://github.com/xinyu1205/recognize-anything.git \
+    && pip install -r ./recognize-anything/requirements.txt \
+    && pip install -e ./recognize-anything/
+
+RUN pip install supervision==0.21
+RUN pip install litellm
+
+RUN apt update && apt install -y wget
+RUN cd /Grounded-Segment-Anything \
+    && wget --quiet https://github.com/IDEA-Research/GroundingDINO/releases/download/v0.1.0-alpha/groundingdino_swint_ogc.pth \
+    && wget --quiet https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth \
+    && wget --quiet  https://huggingface.co/spaces/xinyu1205/Tag2Text/resolve/main/ram_swin_large_14m.pth
+
+
+ENV PYTHONPATH=/Grounded-Segment-Anything:/Grounded-Segment-Anything/segment_anything:/Grounded-Segment-Anything/recognize-anything:/detectron2_repo
