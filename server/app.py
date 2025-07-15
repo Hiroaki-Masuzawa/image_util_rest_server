@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from fastapi.responses import JSONResponse
 import uvicorn
 import numpy as np
@@ -45,7 +45,7 @@ import re
 def load_RGS_model():
     None
 
-def pred_RGS_model(image_pil):
+def pred_RGS_model(image_pil, text_prompt):
     config_file = '/Grounded-Segment-Anything/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py'
     grounded_checkpoint = '/Grounded-Segment-Anything/groundingdino_swint_ogc.pth'
     ram_checkpoint = '/Grounded-Segment-Anything/ram_swin_large_14m.pth'
@@ -73,17 +73,20 @@ def pred_RGS_model(image_pil):
                     TS.Resize((384, 384)),
                     TS.ToTensor(), normalize
                 ])
-    
-    ram_model = ram(pretrained=ram_checkpoint,
-                                        image_size=384,
-                                        vit='swin_l')
-    ram_model.eval()
+    if text_prompt is None:
+        ram_model = ram(pretrained=ram_checkpoint,
+                                            image_size=384,
+                                            vit='swin_l')
+        ram_model.eval()
 
-    ram_model = ram_model.to(device)
-    raw_image = image_pil.resize((384, 384))
-    raw_image  = transform2(raw_image).unsqueeze(0).to(device)
-    res = inference_ram(raw_image , ram_model)
-    tags = res[0].replace(' |', ',')
+        ram_model = ram_model.to(device)
+        raw_image = image_pil.resize((384, 384))
+        raw_image  = transform2(raw_image).unsqueeze(0).to(device)
+        res = inference_ram(raw_image , ram_model)
+        tags = res[0].replace(' |', ',')
+    else :
+        tags = text_prompt
+
     boxes_filt, scores, pred_phrases = get_grounding_output(
         grounded_model, image, tags, box_threshold, text_threshold, device=device
     )
@@ -103,51 +106,52 @@ def pred_RGS_model(image_pil):
     pred_phrases = [pred_phrases[idx] for idx in nms_idx]
 
     transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image_np.shape[:2]).to(device)
-    masks, _, _ = predictor.predict_torch(
-        point_coords = None,
-        point_labels = None,
-        boxes = transformed_boxes.to(device),
-        multimask_output = False,
-    )
-    value  = 0
-    mask_img = torch.zeros(masks.shape[-2:])
-    for idx, mask in enumerate(masks):
-        mask_img[mask.cpu().numpy()[0] == True] = value + idx + 1
-
     results = []
-    for phrase, bbox, mask in zip(pred_phrases, boxes_filt.cpu(), masks.cpu()):
-        match = re.match(r"(.+?)\s*\(([^()]*)\)", phrase)
-        if match:
-            class_name = match.group(1)
-            confidence = match.group(2)
-        else :
-            class_name = phrase
-            confidence = 1.0
-        x1, y1, x2, y2 = bbox.numpy().astype(np.float64)
-        center_x = (x1+x2)/2
-        center_y = (y1+y2)/2
-        width = (x2-x1)/2
-        height = (y2-y1)/2
+    if transformed_boxes.shape[0] != 0:
+        masks, _, _ = predictor.predict_torch(
+            point_coords = None,
+            point_labels = None,
+            boxes = transformed_boxes.to(device),
+            multimask_output = False,
+        )
+        value  = 0
+        mask_img = torch.zeros(masks.shape[-2:])
+        for idx, mask in enumerate(masks):
+            mask_img[mask.cpu().numpy()[0] == True] = value + idx + 1
 
-        contours, _ = cv2.findContours(mask[0].numpy().astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        points = []
-        for contour in contours:
-            for point in contour:
-                x, y = point[0]
-                points.append({"x": int(x), "y": int(y)})
+        for phrase, bbox, mask in zip(pred_phrases, boxes_filt.cpu(), masks.cpu()):
+            match = re.match(r"(.+?)\s*\(([^()]*)\)", phrase)
+            if match:
+                class_name = match.group(1)
+                confidence = match.group(2)
+            else :
+                class_name = phrase
+                confidence = 1.0
+            x1, y1, x2, y2 = bbox.numpy().astype(np.float64)
+            center_x = (x1+x2)/2
+            center_y = (y1+y2)/2
+            width = (x2-x1)/2
+            height = (y2-y1)/2
 
-        mask = mask.numpy().astype(np.int64)
-        results.append({
-                "class": class_name,
-                "confidence": confidence,
-                "bbox": [x1, y1, x2, y2],
-                "x": float(center_x),
-                "y": float(center_y),
-                "width": float(width),
-                "height": float(height),
-                "mask": mask[0].tolist(),
-                "points": points,
-            })
+            contours, _ = cv2.findContours(mask[0].numpy().astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            points = []
+            for contour in contours:
+                for point in contour:
+                    x, y = point[0]
+                    points.append({"x": int(x), "y": int(y)})
+
+            mask = mask.numpy().astype(np.int64)
+            results.append({
+                    "class": class_name,
+                    "confidence": confidence,
+                    "bbox": [x1, y1, x2, y2],
+                    "x": float(center_x),
+                    "y": float(center_y),
+                    "width": float(width),
+                    "height": float(height),
+                    "mask": mask[0].tolist(),
+                    "points": points,
+                })
     return results
 
 
@@ -160,7 +164,10 @@ model_registry: Dict[str, Dict] = {
 # --- 画像予測処理 ---
 
 @app.post("/{model_name}/predict")
-async def predict(model_name: str, file: UploadFile = File(...)):
+async def predict(model_name: str,
+                   file: UploadFile = File(...),
+                   text_prompt: str = Form(None),
+                   ):
     if model_name not in model_registry:
         raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found.")
 
@@ -213,7 +220,7 @@ async def predict(model_name: str, file: UploadFile = File(...)):
 
         return JSONResponse(content={"predictions": results})
     else:
-        results = pred_RGS_model(image_pil=image)
+        results = pred_RGS_model(image_pil=image, text_prompt=text_prompt)
         return JSONResponse(content={"predictions": results})
 
 @app.get("/ping")

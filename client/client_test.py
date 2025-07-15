@@ -2,7 +2,12 @@ import requests
 
 
 def get_instance_segmentation(
-    image_path, servername="localhost", port=8000, model="ram-grounded-sam", debug=False
+    image_path,
+    servername="localhost",
+    port=8000,
+    model="ram-grounded-sam",
+    prompt="",
+    debug=False,
 ):
     if image_path.split(".")[-1] == "jpg":
         imagetype = "png"
@@ -10,9 +15,12 @@ def get_instance_segmentation(
         imagetype = "jpeg"
 
     url = "http://{}:{}/{}/predict".format(servername, port, model)
+    data = {}
+    if prompt != "":
+        data["text_prompt"] = prompt
     with open(image_path, "rb") as f:
         files = {"file": (image_path, f, "image/{}".format(imagetype))}
-        response = requests.post(url, files=files)
+        response = requests.post(url, files=files, data=data)
 
     response_dict = response.json()
     if debug:
@@ -55,12 +63,18 @@ import argparse
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--image_path', type=str, default="") 
-    parser.add_argument('--server', type=str, default="localhost") 
-    parser.add_argument('--port', type=int, default=8000) 
-    parser.add_argument('--model', type=str, default='maskrcnn', choices=['maskrcnn','ram-grounded-sam']) 
-    parser.add_argument('--debug', action='store_true')
-    args = parser.parse_args() 
+    parser.add_argument("--image_path", type=str, default="")
+    parser.add_argument("--server", type=str, default="localhost")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="maskrcnn",
+        choices=["maskrcnn", "ram-grounded-sam"],
+    )
+    parser.add_argument("--prompt", type=str, default="")
+    parser.add_argument("--debug", action="store_true")
+    args = parser.parse_args()
 
     image_path = args.image_path
     result = get_instance_segmentation(
@@ -68,6 +82,7 @@ if __name__ == "__main__":
         servername=args.server,
         port=args.port,
         model=args.model,
+        prompt=args.prompt,
         debug=args.debug,
     )
 
