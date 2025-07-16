@@ -91,9 +91,6 @@ def pred_RGS_model(image_pil, text_prompt):
         grounded_model, image, tags, box_threshold, text_threshold, device=device
     )
 
-    predictor = SamPredictor(build_sam(checkpoint=sam_checkpoint).to(device))
-    image_np = np.array(image_pil)
-    predictor.set_image(image_np)
     size = image_pil.size
     H, W = size[1], size[0]
     for i in range(boxes_filt.size(0)):
@@ -105,9 +102,12 @@ def pred_RGS_model(image_pil, text_prompt):
     boxes_filt = boxes_filt[nms_idx]
     pred_phrases = [pred_phrases[idx] for idx in nms_idx]
 
-    transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image_np.shape[:2]).to(device)
     results = []
-    if transformed_boxes.shape[0] != 0:
+    if boxes_filt.shape[0] != 0:
+        predictor = SamPredictor(build_sam(checkpoint=sam_checkpoint).to(device))
+        image_np = np.array(image_pil)
+        predictor.set_image(image_np)
+        transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image_np.shape[:2]).to(device)
         masks, _, _ = predictor.predict_torch(
             point_coords = None,
             point_labels = None,
@@ -123,7 +123,7 @@ def pred_RGS_model(image_pil, text_prompt):
             match = re.match(r"(.+?)\s*\(([^()]*)\)", phrase)
             if match:
                 class_name = match.group(1)
-                confidence = match.group(2)
+                confidence = float(match.group(2))
             else :
                 class_name = phrase
                 confidence = 1.0
