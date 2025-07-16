@@ -46,16 +46,35 @@ import re
 def load_RGS_model():
     None
 
+
+config_file = '/Grounded-Segment-Anything/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py'
+grounded_checkpoint = '/Grounded-Segment-Anything/groundingdino_swint_ogc.pth'
+ram_checkpoint = '/Grounded-Segment-Anything/ram_swin_large_14m.pth'
+sam_checkpoint_h = '/Grounded-Segment-Anything/sam_vit_h_4b8939.pth'
+sam_checkpoint_b = '/Grounded-Segment-Anything/sam_vit_b_01ec64.pth'
+device = 'cuda'
+
+ram_model = None
+grounded_model = None
+predictor = None
+
+@app.on_event("startup")
+async def load_dnn_models():
+    global ram_model
+    global grounded_model
+    global predictor
+    ram_model = ram(pretrained=ram_checkpoint,
+                                            image_size=384,
+                                            vit='swin_l')
+    ram_model.eval()
+    grounded_model = load_model(config_file, grounded_checkpoint, device=device)
+    # predictor = SamPredictor(build_sam(checkpoint=sam_checkpoint_h).to(device))
+    predictor = SamPredictor(build_sam_vit_b(checkpoint=sam_checkpoint_b).to(device))
+
 def pred_RGS_model(image_pil, text_prompt):
-    config_file = '/Grounded-Segment-Anything/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py'
-    grounded_checkpoint = '/Grounded-Segment-Anything/groundingdino_swint_ogc.pth'
-    ram_checkpoint = '/Grounded-Segment-Anything/ram_swin_large_14m.pth'
-    sam_checkpoint_h = '/Grounded-Segment-Anything/sam_vit_h_4b8939.pth'
-    sam_checkpoint_b = '/Grounded-Segment-Anything/sam_vit_b_01ec64.pth'
     box_threshold = 0.25
     text_threshold  = 0.2
     iou_threshold = 0.5
-    device = 'cuda'
 
     transform1 = T.Compose(
         [
@@ -74,11 +93,7 @@ def pred_RGS_model(image_pil, text_prompt):
                     TS.ToTensor(), normalize
                 ])
     if text_prompt is None:
-        ram_model = ram(pretrained=ram_checkpoint,
-                                            image_size=384,
-                                            vit='swin_l')
-        ram_model.eval()
-
+        global ram_model
         ram_model = ram_model.to(device)
         raw_image = image_pil.resize((384, 384))
         raw_image  = transform2(raw_image).unsqueeze(0).to(device)
@@ -87,7 +102,7 @@ def pred_RGS_model(image_pil, text_prompt):
     else :
         tags = text_prompt
 
-    grounded_model = load_model(config_file, grounded_checkpoint, device=device)
+    global grounded_model
     boxes_filt, scores, pred_phrases = get_grounding_output(
         grounded_model, image, tags, box_threshold, text_threshold, device=device
     )
@@ -105,8 +120,7 @@ def pred_RGS_model(image_pil, text_prompt):
 
     results = []
     if boxes_filt.shape[0] != 0:
-        # predictor = SamPredictor(build_sam(checkpoint=sam_checkpoint_h).to(device))
-        predictor = SamPredictor(build_sam_vit_b(checkpoint=sam_checkpoint_b).to(device))
+        global predictor
         image_np = np.array(image_pil) # RGB
         predictor.set_image(image_np)
         transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image_np.shape[:2]).to(device)
