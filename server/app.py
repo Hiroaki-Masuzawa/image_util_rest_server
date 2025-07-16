@@ -56,20 +56,20 @@ device = 'cuda'
 
 ram_model = None
 grounded_model = None
-predictor = None
+sam_predictor = None
 
 @app.on_event("startup")
 async def load_dnn_models():
     global ram_model
     global grounded_model
-    global predictor
+    global sam_predictor
     ram_model = ram(pretrained=ram_checkpoint,
                                             image_size=384,
                                             vit='swin_l')
     ram_model.eval()
     grounded_model = load_model(config_file, grounded_checkpoint, device=device)
     # predictor = SamPredictor(build_sam(checkpoint=sam_checkpoint_h).to(device))
-    predictor = SamPredictor(build_sam_vit_b(checkpoint=sam_checkpoint_b).to(device))
+    sam_predictor = SamPredictor(build_sam_vit_b(checkpoint=sam_checkpoint_b).to(device))
 
 def pred_RGS_model(image_pil, text_prompt):
     box_threshold = 0.25
@@ -120,11 +120,11 @@ def pred_RGS_model(image_pil, text_prompt):
 
     results = []
     if boxes_filt.shape[0] != 0:
-        global predictor
+        global sam_predictor
         image_np = np.array(image_pil) # RGB
-        predictor.set_image(image_np)
-        transformed_boxes = predictor.transform.apply_boxes_torch(boxes_filt, image_np.shape[:2]).to(device)
-        masks, _, _ = predictor.predict_torch(
+        sam_predictor.set_image(image_np)
+        transformed_boxes = sam_predictor.transform.apply_boxes_torch(boxes_filt, image_np.shape[:2]).to(device)
+        masks, _, _ = sam_predictor.predict_torch(
             point_coords = None,
             point_labels = None,
             boxes = transformed_boxes.to(device),
